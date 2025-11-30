@@ -155,7 +155,14 @@ class ServerSyncProcessHandler {
     }
 
     private func processStopJob() {
-        _ = self.networkService.deleteDevice(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, retryStrategy: WithInfiniteExpBackoff())
+        if let deviceId = self.deviceStateStore.getDeviceId() {
+            _ = self.networkService.deleteDevice(
+                instanceId: self.instanceId,
+                deviceId: deviceId,
+                retryStrategy: WithInfiniteExpBackoff())
+        } else {
+            print("[PushNotifications]: Warning - Cannot process stop job, deviceId is missing.")
+        }
 //        Instance.delete()
         self.deviceStateStore.deleteDeviceId()
         self.deviceStateStore.deleteAPNsToken()
@@ -166,9 +173,21 @@ class ServerSyncProcessHandler {
     }
 
     private func processApplicationStartJob(metadata: Metadata) {
+        guard let deviceId = self.deviceStateStore.getDeviceId() else {
+            print(
+              "[PushNotifications]: Warning - Cannot process app start job, deviceId is missing.")
+
+            return
+        }
+
         let localMetadata = self.deviceStateStore.getMetadata()
         if metadata != localMetadata {
-            let result = self.networkService.syncMetadata(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, metadata: metadata, retryStrategy: JustDont())
+            let result = self.networkService.syncMetadata(
+                instanceId: self.instanceId,
+                deviceId: deviceId,
+                metadata: metadata,
+                retryStrategy: JustDont())
+
             if case .success = result {
                 self.deviceStateStore.persistMetadata(metadata: metadata)
             }
@@ -178,7 +197,12 @@ class ServerSyncProcessHandler {
         let localInterestsHash = localInterests.calculateMD5Hash()
 
         if localInterestsHash != self.deviceStateStore.getServerConfirmedInterestsHash() {
-            let result = self.networkService.setSubscriptions(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, interests: localInterests, retryStrategy: JustDont())
+            let result = self.networkService.setSubscriptions(
+                instanceId: self.instanceId,
+                deviceId: deviceId,
+                interests: localInterests,
+                retryStrategy: JustDont())
+
             if case .success = result {
                 self.deviceStateStore.persistServerConfirmedInterestsHash(localInterestsHash)
             }
@@ -186,22 +210,52 @@ class ServerSyncProcessHandler {
     }
 
     private func processJob(_ job: ServerSyncJob) {
+        let deviceId = self.deviceStateStore.getDeviceId()
+
         let result: Result<Void, PushNotificationsAPIError> = {
             switch job {
             case .subscribeJob(_, localInterestsChanged: false), .unsubscribeJob(_, localInterestsChanged: false), .setSubscriptions(_, localInterestsChanged: false):
                 return .success(()) // if local interests haven't changed, then we don't need to sync with server
             case .subscribeJob(let interest, localInterestsChanged: true):
-                return self.networkService.subscribe(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, interest: interest, retryStrategy: WithInfiniteExpBackoff())
+                guard let deviceId = deviceId else {
+                    return .failure(.genericError(reason: "Missing deviceId"))
+                }
 
+                return self.networkService.subscribe(
+                    instanceId: self.instanceId,
+                    deviceId: deviceId,
+                    interest: interest,
+                    retryStrategy: WithInfiniteExpBackoff())
             case .unsubscribeJob(let interest, localInterestsChanged: true):
-                return self.networkService.unsubscribe(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, interest: interest, retryStrategy: WithInfiniteExpBackoff())
+                guard let deviceId = deviceId else {
+                    return .failure(.genericError(reason: "Missing deviceId"))
+                }
 
+                return self.networkService.unsubscribe(
+                    instanceId: self.instanceId,
+                    deviceId: deviceId,
+                    interest: interest,
+                    retryStrategy: WithInfiniteExpBackoff())
             case .setSubscriptions(let interests, localInterestsChanged: true):
-                return self.networkService.setSubscriptions(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, interests: interests, retryStrategy: WithInfiniteExpBackoff())
+                guard let deviceId = deviceId else {
+                    return .failure(.genericError(reason: "Missing deviceId"))
+                }
 
+                return self.networkService.setSubscriptions(
+                    instanceId: self.instanceId,
+                    deviceId: deviceId,
+                    interests: interests,
+                    retryStrategy: WithInfiniteExpBackoff())
             case .reportEventJob(let eventType):
-                return self.networkService.track(instanceId: eventType.getInstanceId(), deviceId: self.deviceStateStore.getDeviceId()!, eventType: eventType, retryStrategy: WithInfiniteExpBackoff())
+                guard let deviceId = deviceId else {
+                    return .failure(.genericError(reason: "Missing deviceId"))
+                }
 
+                return self.networkService.track(
+                    instanceId: eventType.getInstanceId(),
+                    deviceId: deviceId,
+                    eventType: eventType,
+                    retryStrategy: WithInfiniteExpBackoff())
             case .applicationStartJob(let metadata):
                 processApplicationStartJob(metadata: metadata)
                 return .success(()) // this was always a best effort operation
@@ -221,7 +275,14 @@ class ServerSyncProcessHandler {
             return
 
         case .failure(.deviceNotFound):
-            if recreateDevice(token: self.deviceStateStore.getAPNsToken()!) {
+            guard let token = self.deviceStateStore.getAPNsToken() else {
+                print(
+                    "[PushNotifications]: Not retrying, skipping job: \(job). Missing APNs token.")
+
+                return
+            }
+
+            if recreateDevice(token: token) {
                 processJob(job)
             } else {
                 print("[PushNotifications]: Not retrying, skipping job: \(job).")
@@ -256,45 +317,59 @@ class ServerSyncProcessHandler {
             }
 
             if let userId = self.deviceStateStore.getUserId() {
-                let tokenProvider = self.getTokenProvider()
-                if tokenProvider == nil {
-                    // Any failures during this process are equivalent to de-authing the user e.g. persistUserId(null)
-                    // If the user session is indeed over, there should be a Stop in the backlog eventually
-                    // If the user session is still valid, there should be a setUserId in the backlog
-
+                // Any failures during this process are equivalent to de-authing the user e.g. persistUserId(null)
+                // If the user session is indeed over, there should be a Stop in the backlog eventually
+                // If the user session is still valid, there should be a setUserId in the backlog
+                guard let tokenProvider = self.getTokenProvider() else {
                     print("[PushNotifications]: Warning - Failed to set the user id due token provider not being present")
                     self.deviceStateStore.removeUserId()
-                } else {
-                    let semaphore = DispatchSemaphore(value: 0)
-                    do {
-                        try tokenProvider!.fetchToken(userId: userId, completionHandler: { jwt, error in
-                            if error != nil {
-                                print("[PushNotifications]: Warning - Unexpected customer error: \(error!.localizedDescription)")
-                                self.deviceStateStore.removeUserId()
-                                semaphore.signal()
-                                return
-                            }
 
-                            let result = self.networkService.setUserId(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, token: jwt, retryStrategy: WithInfiniteExpBackoff())
+                    return true
+                }
 
-                            switch result {
-                            case .success:
-                                _ = self.deviceStateStore.persistUserId(userId: userId)
+                let semaphore = DispatchSemaphore(value: 0)
 
-                            case .failure(let error):
-                                print("[PushNotifications]: Warning - Unexpected error: \(error.debugDescription)")
-                                self.deviceStateStore.removeUserId()
-                                semaphore.signal()
-                                return
-                            }
-
+                do {
+                    try tokenProvider.fetchToken(userId: userId, completionHandler: { jwt, error in
+                        if error != nil {
+                            print("[PushNotifications]: Warning - Unexpected customer error: \(error!.localizedDescription)")
+                            self.deviceStateStore.removeUserId()
                             semaphore.signal()
-                        })
-                        semaphore.wait()
-                    } catch let error {
-                        print("[PushNotifications]: Warning - Unexpected error: \(error.localizedDescription)")
-                        self.deviceStateStore.removeUserId()
-                    }
+
+                            return
+                        }
+
+                        guard let deviceId = self.deviceStateStore.getDeviceId() else {
+                            print("[PushNotifications]: Warning - Device ID missing during user ID set")
+                            self.deviceStateStore.removeUserId()
+                            semaphore.signal()
+
+                            return
+                        }
+
+                        let result = self.networkService.setUserId(
+                            instanceId: self.instanceId,
+                            deviceId: deviceId,
+                            token: jwt,
+                            retryStrategy: WithInfiniteExpBackoff())
+
+                        switch result {
+                        case .success:
+                            _ = self.deviceStateStore.persistUserId(userId: userId)
+                        case .failure(let error):
+                            print("[PushNotifications]: Warning - Unexpected error: \(error.debugDescription)")
+                            self.deviceStateStore.removeUserId()
+                            semaphore.signal()
+
+                            return
+                        }
+
+                        semaphore.signal()
+                    })
+                    semaphore.wait()
+                } catch let error {
+                    print("[PushNotifications]: Warning - Unexpected error: \(error.localizedDescription)")
+                    self.deviceStateStore.removeUserId()
                 }
             }
 
@@ -319,7 +394,19 @@ class ServerSyncProcessHandler {
                     return
                 }
 
-                let result = self.networkService.setUserId(instanceId: self.instanceId, deviceId: self.deviceStateStore.getDeviceId()!, token: jwt, retryStrategy: WithInfiniteExpBackoff())
+                guard let deviceId = self.deviceStateStore.getDeviceId() else {
+                    let error = TokenProviderError.error("[PushNotifications] - Device ID missing")
+                    self.handleServerSyncEvent(.userIdSetEvent(userId: userId, error: error))
+                    semaphore.signal()
+
+                    return
+                }
+
+                let result = self.networkService.setUserId(
+                    instanceId: self.instanceId,
+                    deviceId: deviceId,
+                    token: jwt,
+                    retryStrategy: WithInfiniteExpBackoff())
 
                 switch result {
                 case .success:

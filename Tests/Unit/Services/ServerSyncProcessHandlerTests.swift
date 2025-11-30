@@ -82,7 +82,7 @@ class ServerSyncProcessHandlerTests: XCTestCase {
 
         waitForExpectations(timeout: 1)
     }
-    
+
     func testStopAfterDeviceCouldNotBeCreated() {
         // This test is similar to the previous testStartJobRetriesDeviceCreation, except inverted and tests a specific "Device could not be created" response from our API. It must not retry.
         let url = URL.PushNotifications.devices(instanceId: instanceId)!
@@ -100,7 +100,7 @@ class ServerSyncProcessHandlerTests: XCTestCase {
                 let jsonObject: [String: Any] = [
                     "id": self.deviceId
                 ]
-                
+
                 return HTTPStubsResponse(jsonObject: jsonObject, statusCode: 200, headers: nil)
             } else {
                 return HTTPStubsResponse(jsonObject: jsonObject, statusCode: 500, headers: nil)
@@ -925,6 +925,143 @@ class ServerSyncProcessHandlerTests: XCTestCase {
         XCTAssertTrue(trackCalled)
     }
     #endif
+
+    func testDeviceNotFoundWithoutAPNsTokenSkipsRetry() {
+        self.deviceStateStore.persistDeviceId(deviceId)
+        self.deviceStateStore.deleteAPNsToken()
+
+        var subscribeCallCount = 0
+
+        let subscribeURL = URL.PushNotifications.interest(
+            instanceId: instanceId,
+            deviceId: deviceId,
+            interest: "news")!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(subscribeURL.absoluteString)) { _ in
+            subscribeCallCount += 1
+
+            return HTTPStubsResponse(jsonObject: [:], statusCode: 404, headers: nil)
+        }
+
+        let handler = ServerSyncProcessHandler(
+            instanceId: instanceId,
+            getTokenProvider: noTokenProvider,
+            handleServerSyncEvent: ignoreServerSyncEvent)
+        handler.jobQueue.append(.subscribeJob(interest: "news", localInterestsChanged: true))
+        handler.handleMessage(
+            serverSyncJob: .subscribeJob(interest: "news", localInterestsChanged: true))
+        XCTAssertEqual(subscribeCallCount, 1)
+    }
+
+    func testRecreateDeviceRemovesUserWhenTokenProviderMissing() {
+        self.deviceStateStore.persistDeviceId(deviceId)
+        self.deviceStateStore.persistAPNsToken(token: deviceToken)
+        self.deviceStateStore.persistUserId(userId: "alice")
+
+        var subscribeCallCount = 0
+
+        let oldSubscribeURL = URL.PushNotifications.interest(
+            instanceId: instanceId,
+            deviceId: deviceId,
+            interest: "news")!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(oldSubscribeURL.absoluteString)) {
+            _ in
+
+            subscribeCallCount += 1
+
+            return HTTPStubsResponse(jsonObject: [:], statusCode: 404, headers: nil)
+        }
+
+        let newSubscribeURL = URL.PushNotifications.interest(
+            instanceId: instanceId,
+            deviceId: "new-device-id",
+            interest: "news")!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(newSubscribeURL.absoluteString)) {
+            _ in
+
+            subscribeCallCount += 1
+
+            return HTTPStubsResponse(jsonObject: [:], statusCode: 200, headers: nil)
+        }
+
+        let registerURL = URL.PushNotifications.devices(instanceId: instanceId)!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(registerURL.absoluteString)) { _ in
+            let jsonObject: [String: Any] = ["id": "new-device-id"]
+
+            return HTTPStubsResponse(jsonObject: jsonObject, statusCode: 200, headers: nil)
+        }
+
+        let handler = ServerSyncProcessHandler(
+            instanceId: instanceId,
+            getTokenProvider: noTokenProvider,
+            handleServerSyncEvent: ignoreServerSyncEvent)
+        handler.jobQueue.append(.subscribeJob(interest: "news", localInterestsChanged: true))
+        handler.handleMessage(
+            serverSyncJob: .subscribeJob(interest: "news", localInterestsChanged: true))
+        XCTAssertEqual(subscribeCallCount, 2)
+        XCTAssertNil(self.deviceStateStore.getUserId())
+    }
+
+    func testRecreateDeviceSetsUserIdWhenTokenProviderSucceeds() {
+        self.deviceStateStore.persistDeviceId(deviceId)
+        self.deviceStateStore.persistAPNsToken(token: deviceToken)
+        self.deviceStateStore.persistUserId(userId: "alice")
+
+        var subscribeCallCount = 0
+
+        let oldSubscribeURL = URL.PushNotifications.interest(
+            instanceId: instanceId,
+            deviceId: deviceId,
+            interest: "news")!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(oldSubscribeURL.absoluteString)) {
+            _ in
+
+            subscribeCallCount += 1
+
+            return HTTPStubsResponse(jsonObject: [:], statusCode: 404, headers: nil)
+        }
+
+        let newSubscribeURL = URL.PushNotifications.interest(
+            instanceId: instanceId,
+            deviceId: "new-device-id",
+            interest: "news")!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(newSubscribeURL.absoluteString)) {
+          _ in
+
+          subscribeCallCount += 1
+
+          return HTTPStubsResponse(jsonObject: [:], statusCode: 200, headers: nil)
+        }
+
+        let registerURL = URL.PushNotifications.devices(instanceId: instanceId)!
+        stub(condition: isMethodPOST() && isAbsoluteURLString(registerURL.absoluteString)) { _ in
+            let jsonObject: [String: Any] = ["id": "new-device-id"]
+
+            return HTTPStubsResponse(jsonObject: jsonObject, statusCode: 200, headers: nil)
+        }
+
+        let setUserURL =
+            URL.PushNotifications.user(instanceId: instanceId, deviceId: "new-device-id")!
+
+        let expUserIdSet = expectation(description: "setUserId called after recreation")
+        stub(condition: isMethodPUT() && isAbsoluteURLString(setUserURL.absoluteString)) { _ in
+            expUserIdSet.fulfill()
+
+            return HTTPStubsResponse(jsonObject: [:], statusCode: 200, headers: nil)
+        }
+
+        let tokenProvider = StubTokenProvider(jwt: "jwt-token", error: nil)
+
+        let handler = ServerSyncProcessHandler(
+            instanceId: instanceId,
+            getTokenProvider: { return tokenProvider },
+            handleServerSyncEvent: ignoreServerSyncEvent)
+        handler.jobQueue.append(.subscribeJob(interest: "news", localInterestsChanged: true))
+        handler.handleMessage(
+            serverSyncJob: .subscribeJob(interest: "news", localInterestsChanged: true))
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(subscribeCallCount, 2)
+        XCTAssertEqual(self.deviceStateStore.getUserId(), "alice")
+    }
 
     private class StubTokenProvider: TokenProvider {
         private let jwt: String
