@@ -15,7 +15,38 @@ import Foundation
     }
 
     private static var instance: PushNotifications?
-    static var tokenProvider = [String: TokenProvider]()
+
+    private static var tokenProvider = [String: TokenProvider]()
+
+    private static let tokenProviderQueue =
+        DispatchQueue(label: "com.pusher.beams.tokenProviderQueue")
+
+    /**
+     Get the token provider for the given instance id.
+
+     - Parameter instanceId: PushNotifications instance id.
+
+     - Precondition: `instanceId` should not be nil.
+     */
+    /// - Tag: getTokenProvider
+    static func getTokenProvider(for instanceId: String) -> TokenProvider? {
+        tokenProviderQueue.sync { return tokenProvider[instanceId] }
+    }
+
+    /**
+     Set the token provider for the given instance id.
+
+     - Parameter provider: TokenProvider instance.
+     - Parameter instanceId: PushNotifications instance id.
+
+     - Precondition: `instanceId` should not be nil.
+     */
+    /// - Tag: setTokenProvider
+    static func setTokenProvider(_ provider: TokenProvider, for instanceId: String) {
+        tokenProviderQueue.sync {
+            tokenProvider[instanceId] = provider
+        }
+    }
 
     /**
      Start PushNotifications service.
@@ -54,7 +85,7 @@ import Foundation
     #if os(iOS)
     /**
      Register to receive remote notifications via Apple Push Notification service.
-     
+
      - Parameter options: The authorization options your app is requesting. You may combine the available constants to request authorization for multiple items. Request only the authorization options that you plan to use. For a list of possible values, see [UNAuthorizationOptions](https://developer.apple.com/documentation/usernotifications/unauthorizationoptions).
      */
     /// - Tag: registerOptions
@@ -64,7 +95,7 @@ import Foundation
     #elseif os(OSX)
     /**
      Register to receive remote notifications via Apple Push Notification service.
-     
+
      - Parameter options: A bit mask specifying the types of notifications the app accepts. See [NSApplication.RemoteNotificationType](https://developer.apple.com/documentation/appkit/nsapplication.remotenotificationtype) for valid bit-mask values.
      */
     @objc public static func registerForRemoteNotifications(options: NSApplication.RemoteNotificationType) {
@@ -93,7 +124,7 @@ import Foundation
 
     /**
      Set user id.
-     
+
      - Parameter userId: User id.
      - Parameter tokenProvider: Token provider that will be used to generate the token for the user that you want to authenticate.
      - Parameter completion: The block to execute after attempt to set user id has been made.
@@ -106,10 +137,10 @@ import Foundation
             fatalError("PushNotifications.shared.start must have been called first")
         }
     }
-    
+
     /**
      Get the UserId that the device is currently authenticated to.
-     
+
      - returns: string of UserId
      */
     /// - Tag: getUserId
@@ -122,7 +153,7 @@ import Foundation
     }
     /**
      Disable Beams service.
-     
+
      This will remove everything associated with the Beams from the device and Beams server.
      - Parameter completion: The block to execute after the device has been deleted from the server.
      */
@@ -143,7 +174,7 @@ import Foundation
 
     /**
      Clears all the state on the SDK leaving it in the empty started state.
-     
+
      This will remove the current user and all the interests associated with it from the device and Beams server.
      Device is now in a fresh state, ready for new subscriptions or user being set.
      - Parameter completion: The block to execute after the device has been deleted from the server.
@@ -165,9 +196,9 @@ import Foundation
 
     /**
      Register device token with PushNotifications service.
-     
+
      - Parameter deviceToken: A token that identifies the device to APNs.
-     
+
      - Precondition: `deviceToken` should not be nil.
      */
     /// - Tag: registerDeviceToken
@@ -194,11 +225,11 @@ import Foundation
 
     /**
      Subscribes the device to an interest.
-     
+
      - Parameter interest: Interest that you want to subscribe your device to.
-     
+
      - Precondition: `interest` should not be nil.
-     
+
      - Throws: An error of type `InvalidInterestError`
      */
     /// - Tag: addDeviceInterest
@@ -213,11 +244,11 @@ import Foundation
     /**
      Sets the subscriptions state for the device.
      Any interests not in the set will be unsubscribed from, so this will replace the interest set by the one provided.
-     
+
      - Parameter interests: Interests that you want to subscribe your device to.
-     
+
      - Precondition: `interests` should not be nil.
-     
+
      - Throws: An error of type `MultipleInvalidInterestsError`
      */
     /// - Tag: setDeviceInterests
@@ -231,11 +262,11 @@ import Foundation
 
     /**
      Unsubscribe the device from an interest.
-     
+
      - Parameter interest: Interest that you want to unsubscribe your device from.
-     
+
      - Precondition: `interest` should not be nil.
-     
+
      - Throws: An error of type `InvalidInterestError`
      */
     /// - Tag: removeDeviceInterest
@@ -259,7 +290,7 @@ import Foundation
 
     /**
      Get the interest subscriptions that the device is currently subscribed to.
-     
+
      - returns: Array of interests
      */
     /// - Tag: getDeviceInterests
@@ -273,7 +304,7 @@ import Foundation
 
     /**
      Handle Remote Notification.
-     
+
      - Parameter userInfo: Remote Notification payload.
      */
     /// - Tag: handleNotification

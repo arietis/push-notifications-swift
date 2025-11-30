@@ -36,7 +36,7 @@ import Foundation
 
     private lazy var serverSyncHandler = ServerSyncProcessHandler.obtain(
         instanceId: self.instanceId,
-        getTokenProvider: { return PushNotifications.shared.tokenProvider[self.instanceId] },
+        getTokenProvider: { return PushNotificationsStatic.getTokenProvider(for: self.instanceId) },
         handleServerSyncEvent: { [weak self] event in
             self?.serverSyncEventHandler.handleEvent(event: event)
         }
@@ -113,7 +113,7 @@ import Foundation
             return
         }
 
-        PushNotifications.shared.tokenProvider[self.instanceId] = tokenProvider
+        PushNotificationsStatic.setTokenProvider(tokenProvider, for: self.instanceId)
 
         var localUserIdDifferent: Bool?
         InstanceDeviceStateStore.synchronize {
@@ -152,10 +152,10 @@ import Foundation
         }
         self.serverSyncHandler.sendMessage(serverSyncJob: .setUserIdJob(userId: userId))
     }
-    
+
     /**
      Get the UserId that the device is currently authenticated to.
-     
+
      - returns: string of UserId
      */
     /// - Tag: getUserId
